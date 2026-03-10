@@ -9,7 +9,6 @@ class quadrotor_controller():
         # Exercise 1: Choose what to tune ["vel_z", "pos_z", "vel_xy", "pos_xy"]
         self.tuning_level = "off" #"off" to disable tuning
         
-        ### START EXERCISE 1 tuning part ###
         # Only change the gains you are asked to, the others are already tuned by us (INITIAL GAINS)
         gains = {
                     "P_pos_z": 2.9,     "I_pos_z": 0.0,     "D_pos_z": 0.5,
@@ -52,6 +51,28 @@ class quadrotor_controller():
                         "L_acc_rp": np.pi/6,
                         "L_vel_z": 0.75
                         }
+        else:
+            ### START EXERCISE 1 SOLUTION ###
+            gains = {
+                        "P_pos_z": 5.0,     "I_pos_z": 0.0,     "D_pos_z": 0.8,
+                        "P_pos_xy": 1.5,    "I_pos_xy": 0.0,    "D_pos_xy": 0.0,
+                        "P_vel_z": 7.0,     "I_vel_z": 0.0,     "D_vel_z": 2.0,
+                        "P_vel_xy": 0.5,    "I_vel_xy": 0.0,    "D_vel_xy": 0.015,
+                        "P_att_rp": 10.0,   "I_att_rp": 0.0,    "D_att_rp": 0.2,
+                        "P_att_y": 4.0,     "I_att_y": 0.0,     "D_att_y": 0.3,
+                        "P_rate_rp": 1.5,   "I_rate_rp":0.0,    "D_rate_rp": 0.1,
+                        "P_rate_y": 0.02,   "I_rate_y": 0.0,    "D_rate_y": 0.001
+                        }
+
+                        
+            self.limits = {
+                        "L_rate_rp": 2.0,
+                        "L_rate_y": 3.0,
+                        "L_acc_rp": np.pi/6,
+                        "L_vel_z": 0.75,
+                        "L_vel_xy": 2.0
+                        }
+            ### END EXERCISE 1 SOLUTION ###
                 
         self.global_time = 0
         self.mass = 0.0552 #[kg]
@@ -109,7 +130,10 @@ class quadrotor_controller():
                 self.init_pos = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], 0]
             setpoint = self.init_pos + np.array([0,0,0.75,0]) #Hover above initial position
 
-        ### START EXERCISE 1 implementation part ###
+        ### START EXERCISE 1 SOLUTION ###
+
+        # To check what is in sensor_data, look at main.py -> def read_sensors(self)
+
         ### Position control loop ###
         # For tuning
         if self.tuning_level == "pos_xy":
