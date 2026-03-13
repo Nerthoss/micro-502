@@ -182,6 +182,9 @@ class quadrotor_controller():
         acc_x_setpoint = self.pid_vel_x.call(sensor_data["v_forward"], dt=dt)
         acc_y_setpoint = self.pid_vel_y.call(sensor_data["v_left"], dt=dt)
         acc_z_setpoint = self.pid_vel_z.call(sensor_data["v_up"], dt=dt)
+        acc_x_setpoint = self.pid_vel_x.call(sensor_data["v_forward"], dt=dt)
+        acc_y_setpoint = self.pid_vel_y.call(sensor_data["v_left"], dt=dt)
+        acc_z_setpoint = self.pid_vel_z.call(sensor_data["v_up"], dt=dt)
 
         return self.acceleration_and_yaw_to_pwm(dt, [acc_x_setpoint, acc_y_setpoint, acc_z_setpoint], yaw_setpoint, sensor_data)
     
