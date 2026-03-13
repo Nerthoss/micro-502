@@ -12,10 +12,10 @@ class quadrotor_controller():
         ### START EXERCISE 1 tuning part ###
         # Only change the gains you are asked to, the others are already tuned by us (INITIAL GAINS)
         gains = {
-                    "P_pos_z": 8.0,     "I_pos_z": 0.0,     "D_pos_z": 0.8,
-                    "P_pos_xy": 0.5,    "I_pos_xy": 0.0,    "D_pos_xy": 0.0,
-                    "P_vel_z": 2.0,     "I_vel_z": 0.0,     "D_vel_z": 1.0,
-                    "P_vel_xy": 0.2,    "I_vel_xy": 0.0,    "D_vel_xy": 0.0,
+                    "P_pos_z": 2.9,     "I_pos_z": 0.0,     "D_pos_z": 0.5,
+                    "P_pos_xy": 0.79994939,    "I_pos_xy": 0.0,    "D_pos_xy": 0.0,
+                    "P_vel_z": 10.64,   "I_vel_z": 0.0,     "D_vel_z": 1.782,
+                    "P_vel_xy": 0.721,   "I_vel_xy": 0.045, "D_vel_xy": 0.027,
                     "P_att_rp": 10.0,   "I_att_rp": 0.0,    "D_att_rp": 0.2,
                     "P_att_y": 4.0,     "I_att_y": 0.0,     "D_att_y": 0.3,
                     "P_rate_rp": 1.5,   "I_rate_rp":0.0,    "D_rate_rp": 0.1,
@@ -124,7 +124,7 @@ class quadrotor_controller():
         yaw_setpoint = setpoint[3]
 
         # Calculate rotat ion
-        R_current = R.from_euler('zyx', [sensor_data["yaw"], sensor_data["pitch"], sensor_data["roll"]], degrees=False)
+        R_current = R.from_quat([sensor_data["q_x"], sensor_data["q_y"], sensor_data["q_z"], sensor_data["q_w"]])  # Current orientation as a rotation object
         R_body_to_inertial = R_current.as_matrix()  # Rotation from body to inertial frame
         R_inertial_to_body = R_body_to_inertial.T  # Inverse (transpose for rotation matrices)
 
@@ -159,8 +159,7 @@ class quadrotor_controller():
         acc_y_setpoint = self.pid_vel_y.call(sensor_data["v_left"], dt=dt)
         acc_z_setpoint = self.pid_vel_z.call(sensor_data["v_up"], dt=dt)
 
-        # return self.acceleration_and_yaw_to_pwm(dt, [acc_x_setpoint, acc_y_setpoint, acc_z_setpoint], yaw_setpoint, sensor_data)
-        return self.acceleration_and_yaw_to_pwm(dt, [0, 0, 0], 0, sensor_data) #replace this with the line above
+        return self.acceleration_and_yaw_to_pwm(dt, [acc_x_setpoint, acc_y_setpoint, acc_z_setpoint], yaw_setpoint, sensor_data)
     
         ### END EXERCISE 1 implementation part ###
     
