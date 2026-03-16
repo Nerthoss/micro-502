@@ -12,7 +12,7 @@ class kalman_filter():
         self.noise_std_ACCEL = 0.05
 
         #Tuning parameter
-        self.q_tr = 1.0 # Tuning parameter for process noise (Part 3)
+        self.q_tr = 0.7 #0.7 # Original: 1.0 #Best: 0.5
 
         #Initialize KF state and model uncertainty
         self.initialize_KF(self.noise_std_GPS, self.noise_std_ACCEL)
@@ -24,7 +24,7 @@ class kalman_filter():
         self.use_accel_only = False # Enable this to test the drone response when only accelerometer measurements are used in the Kalman Filter (Part 2)
 
         # Simulation time after which plots are generated
-        self.plot_time_limit = 25.0
+        self.plot_time_limit = 30.0
 
         # ---------------------------------- DO NOT MODIFY ---------------------------------
         #Variables for Plotting
@@ -43,9 +43,21 @@ class kalman_filter():
         self.v_x_noisy = 0.0
         self.v_y_noisy = 0.0
         self.v_z_noisy = 0.0
+
+        # Good Kalman Filter PID Gains
+        # KF gains
+        # gains = {
+        #             "P_pos_z": 5.0,     "I_pos_z": 0.0,     "D_pos_z": 2.5,
+        #             "P_pos_xy": 2.0,    "I_pos_xy": 0.0,    "D_pos_xy": 0.0,
+        #             "P_vel_z": 7.0,     "I_vel_z": 0.1,     "D_vel_z": 2.0,
+        #             "P_vel_xy": 0.5,    "I_vel_xy": 0.0,    "D_vel_xy": 0.015,
+        #             "P_att_rp": 8.0,   "I_att_rp": 0.0,    "D_att_rp": 0.9,
+        #             "P_att_y": 2.0,     "I_att_y": 0.0,     "D_att_y": 1.0,
+        #             "P_rate_rp": 1.5,   "I_rate_rp":0.0,    "D_rate_rp": 0.15,
+        #             "P_rate_y": 0.01,   "I_rate_y": 0.0,    "D_rate_y": 0.002
+        #             }
     
     def initialize_KF(self, noise_std_GPS, noise_std_ACCEL):
-
         # IMPORTANT: Assume the state vectors in the order: X = [x, v_x, a_x, y, v_y, a_y, z, v_z, a_z], Shape: (n_states,1)
         # n_states = 9
         # n_measurements = 3
@@ -60,7 +72,6 @@ class kalman_filter():
         # Inputs:
         #   noise_std_GPS: Standard deviation of GPS noise
         #   noise_std_ACCEL: Standard deviation of Accelerometer noise
-
         # YOUR CODE HERE
         # -----------------------------------
         self.X_opt = np.random.rand(9,1) # Initialize the optimal state vector (self.X_opt) as a random vector of shape (n_states, 1)
@@ -90,6 +101,13 @@ class kalman_filter():
         # YOUR CODE HERE
         # -----------------------------------
 
+        # A_trans = ...
+
+        # X_pred = ...
+        # P_pred = ...
+
+        # SAMPLE SOLUTION
+
         # Define the state transition matrix A_trans (n_states x n_states)
         A_trans = np.array([[1, dt, 0.5*dt**2, 0, 0, 0, 0, 0, 0],
                             [0, 1, dt, 0, 0, 0, 0, 0, 0],
@@ -112,9 +130,9 @@ class kalman_filter():
         #   X_pred: State propagated to time of fusion (n_states x 1)
         #   P_pred: Covariance matrix propagated to time of fusion (n_states x n_states)
         #   H: Measurement Matrix of measured sensor (n_measurements x n_states)
-        #   R: Measurement Covariance of measured sensor (n_measurements x n_measurements)
+        #   R: Measurement Covariance of measured sensor (n_measurements x n_states)
         #   Z: Measurement vector received from the sensor (n_measurements x 1)
-        # Outputs:
+        # Returns:
         #   self.X_opt: Fused state estimate at sensor readout time (n_states x 1)
         #   self.P_opt: Fused covariance matrix at sensor readout time (n_states x n_states)
 
@@ -140,7 +158,7 @@ class kalman_filter():
         #       -> 3: Accelerometer and GPS measurements received simultaneously
         #   measured_state_gps: The latest GPS position measurement (X,Y,Z) in inertial world frame (n_measurements x 1)
         #   measured_state_accel: The latest ACCELEROMETER measurement (A_X, A_Y, A_Z) in  world frame (n_measurements x 1)
-        # Outputs:
+        # Returns:
         #   X_est: Estimated drone state (n_states x 1)
         #   P_est: Estimated covariance (n_states x n_states)
 
@@ -160,9 +178,9 @@ class kalman_filter():
         if sensor_state_flag == 2:
             X_est, P_est = self.KF_sensor_fusion(X_prop, P_prop, self.H_ACCEL, self.R_ACCEL, measured_state_accel) # If only accelerometer measurement is received, fuse the accelerometer measurement with the propagated state using the KF_sensor_fusion function
         if sensor_state_flag == 3:
-            X_opt_gps, P_opt_gps = self.KF_sensor_fusion(X_prop, P_prop, self.H_GPS, self.R_GPS, measured_state_gps) #Fuse the GPS measurement with the propagated state
-            X_est, P_est = self.KF_sensor_fusion(X_opt_gps, P_opt_gps, self.H_ACCEL, self.R_ACCEL, measured_state_accel) #Fuse the fused GPS state (X_opt_gps) with the accelerometer measurement at the same timestep
-        
+            X_opt_gps, P_opt_gps = self.KF_sensor_fusion(X_prop, P_prop, self.H_GPS, self.R_GPS, measured_state_gps)
+            X_est, P_est = self.KF_sensor_fusion(X_opt_gps, P_opt_gps, self.H_ACCEL, self.R_ACCEL, measured_state_accel)
+
         return X_est, P_est
     
     # --------------------------------------------------------- WORK ONLY UP TO HERE --------------------------------------------------------------------------------- #
@@ -232,9 +250,6 @@ class kalman_filter():
         noisy_data_vec_np = np.array(self.noisy_data_vec)
         KF_estimate_vec_np = np.array(self.KF_estimate_vec)
         time = np.array(self.time)
-
-        new_dir = os.path.abspath(os.path.join(os.path.join(os.getcwd(), os.pardir), os.pardir)) + "/docs/exercise_2"
-        os.chdir(new_dir)
 
         colors = ['blue', 'darkorange', 'green']
         colors_two = ['red', 'brown', 'black']
