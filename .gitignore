@@ -138,3 +138,6 @@ dmypy.json
 # Occupancy map
 map.png
 
+.DS_Store
+docs/.DS_Store
+docs/.DS_Store
