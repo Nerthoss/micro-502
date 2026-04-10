@@ -63,14 +63,18 @@ class kalman_filter():
 
         # YOUR CODE HERE
         # -----------------------------------
-        self.X_opt = ...
-        self.P_opt = ...
+        self.X_opt = np.random.rand(9,1) # Initialize the optimal state vector (self.X_opt) as a random vector of shape (n_states, 1)
+        self.P_opt = np.eye(9) * 100000 # Initialize the optimal prediction covariance (self.P_opt) as a diagonal matrix with large values
 
-        self.H_GPS = ...
-        self.H_ACCEL = ...
+        self.H_GPS = np.array([[1, 0, 0, 0, 0, 0, 0, 0, 0],
+                              [0, 0, 0, 1, 0, 0, 0, 0, 0],
+                              [0, 0, 0, 0, 0, 0, 1, 0, 0]]) # Initialize the GPS Measurement Matrix (self.H_GPS) to map the state vector to the GPS measurements (X,Y,Z)
+        self.H_ACCEL = np.array([[0, 0, 1, 0, 0, 0, 0, 0, 0], 
+                                 [0, 0, 0, 0, 0, 1, 0, 0, 0], 
+                                 [0, 0, 0, 0, 0, 0, 1, 0, 0]]) # Initialize the Accelerometer Measurement Matrix (self.H_ACCEL) to map the state vector to the accelerometer measurements (A_X, A_Y, A_Z)
 
-        self.R_GPS = ...
-        self.R_ACCEL = ...
+        self.R_GPS = np.eye(3) * (noise_std_GPS**2)
+        self.R_ACCEL = np.eye(3) * (noise_std_ACCEL**2)
 
     def KF_state_propagation(self, dt):
         # Function that propagates the last fused state over a time-interval dt
@@ -87,12 +91,19 @@ class kalman_filter():
         # -----------------------------------
 
         # Define the state transition matrix A_trans (n_states x n_states)
-        A_trans = ...
+        A_trans = np.array([[1, dt, 0.5*dt**2, 0, 0, 0, 0, 0, 0],
+                            [0, 1, dt, 0, 0, 0, 0, 0, 0],
+                            [0, 0, 1, 0, 0, 0, 0, 0, 0],
+                            [0, 0, 0, 1, dt, 0.5*dt**2, 0, 0, 0],
+                            [0, 0, 0, 0, 1, dt, 0, 0, 0],
+                            [0, 0, 0, 0, 0, 1, 0, 0, 0],
+                            [0, 0, 0, 0, 0, 0 ,1 ,dt ,0.5*dt**2],
+                            [0, 0, 0 ,0 ,0 ,0 ,0 ,1 ,dt],
+                            [0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1]]) 
 
         # Calculate the propagated state (X_pred) and the propagated covariance (P_pred) using the last fused state (self.X_opt) and covariance (self.P_opt)
-        X_pred = ... # X_pred must be 2D array of shape (n_states, 1) Hint: Check the shape, if it does not match in your implementation use the .reshape(-1, 1) attribute
-        P_pred = ...
-
+        X_pred = A_trans @ self.X_opt # X_pred must be 2D array of shape (n_states, 1) Hint: Check the shape, if it does not match in your implementation use the .reshape(-1, 1) attribute
+        P_pred = A_trans @ self.P_opt @ A_trans.T + Q_trans 
         return X_pred, P_pred
 
     def KF_sensor_fusion(self, X_pred, P_pred, H, R, Z):
@@ -110,16 +121,16 @@ class kalman_filter():
         # YOUR CODE HERE
         # -----------------------------------
         # Calculate the Kalman Gain (K)
-        K = ...
+        K = P_pred @ H.T @ np.linalg.inv(H @ P_pred @ H.T + R)
 
         # Use the KF update turle to obtain the optimal state estimate (self.X_opt) and optimal covariance (self.P_opt)
-        self.X_opt = ...
-        self.P_opt = ...
+        self.X_opt = X_pred + K @ (Z - H @ X_pred)
+        self.P_opt = (np.eye(9) - K @ H) @ P_pred
 
         return self.X_opt, self.P_opt
 
     def KF_estimate(self, measured_state_gps, measured_state_accel, dt_last_measurement, sensor_state_flag):
-        # Function that outputs the state estimate wehn requested
+        # Function that outputs the state estimate when requested
         # Inputs:
         #   dt_last_measurement: Time elapsed since last acceleration measurements received from either acclerometer or GPS (always > 0)
         #   sensor_state_flag: Possible values are [0,1,2,3]
@@ -137,11 +148,17 @@ class kalman_filter():
         # -----------------------------------
 
         # Propagate the state to the current timestep
-        X_prop, P_prop = ...
+        X_prop, P_prop = self.KF_state_propagation(dt_last_measurement) # Propagate the last fused state to the current time using the KF_state_propagation function
 
         # Perform the sensor fusion dependant on measurement case and the propagated step (sensor_state_flag cases 0,1,2,3)
 
         # # Example implementation for case sensor_state_flag = 3
+        if sensor_state_flag == 0:
+            X_est, P_est = X_prop, P_prop # If no measurement is received, the propagated state is the best estimate we have for the current time step
+        if sensor_state_flag == 1:
+            X_est, P_est = self.KF_sensor_fusion(X_prop, P_prop, self.H_GPS, self.R_GPS, measured_state_gps) # If only GPS measurement is received, fuse the GPS measurement with the propagated state using the KF_sensor_fusion function
+        if sensor_state_flag == 2:
+            X_est, P_est = self.KF_sensor_fusion(X_prop, P_prop, self.H_ACCEL, self.R_ACCEL, measured_state_accel) # If only accelerometer measurement is received, fuse the accelerometer measurement with the propagated state using the KF_sensor_fusion function
         if sensor_state_flag == 3:
             X_opt_gps, P_opt_gps = self.KF_sensor_fusion(X_prop, P_prop, self.H_GPS, self.R_GPS, measured_state_gps) #Fuse the GPS measurement with the propagated state
             X_est, P_est = self.KF_sensor_fusion(X_opt_gps, P_opt_gps, self.H_ACCEL, self.R_ACCEL, measured_state_accel) #Fuse the fused GPS state (X_opt_gps) with the accelerometer measurement at the same timestep
