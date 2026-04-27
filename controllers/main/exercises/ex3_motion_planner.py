@@ -59,8 +59,6 @@ class MotionPlanner3D():
         A_m = np.zeros((5,6))
         
         # TASK: Fill in the constraint factor matrix values where each row corresponds to the positions, velocities, accelerations, snap and jerk here
-        # SOLUTION ---------------------------------------------------------------------------------- ## 
-        
         A_m = np.array([
             [t**5, t**4, t**3, t**2, t, 1], #pos
             [5*(t**4), 4*(t**3), 3*(t**2), 2*t, 1, 0], #vel
@@ -68,7 +66,7 @@ class MotionPlanner3D():
             [60*(t**2), 24*t, 6, 0, 0, 0], #jerk
             [120*t, 24, 0, 0, 0, 0] #snap
         ])
-
+        
         return A_m
 
     def compute_poly_coefficients(self, path_waypoints):
@@ -96,7 +94,6 @@ class MotionPlanner3D():
             pos = np.array([p[dim] for p in path_waypoints])
             A_0 = self.compute_poly_matrix(0) # A_0 gives the constraint factor matrix A_m for any segment at t=0, this is valid for the starting conditions at every path segment
 
-            # SOLUTION
             row = 0
             for i in range(m-1):
                 pos_0 = pos[i] #Starting position of the segment
@@ -155,7 +152,7 @@ class MotionPlanner3D():
                     row += 1
             # Solve for the polynomial coefficients for the dimension dim
 
-            poly_coeffs[:,dim] = np.linalg.solve(A, b)   
+            poly_coeffs[:,dim] = np.linalg.solve(A, b)     
 
         return poly_coeffs
 
