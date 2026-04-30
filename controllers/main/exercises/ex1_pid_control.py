@@ -147,7 +147,7 @@ class quadrotor_controller():
         pos_z_error = setpoint[2] - sensor_data["z_global"]
         yaw_setpoint = setpoint[3]
 
-        # Calculate rotat ion
+        # Calculate rotation
         R_current = R.from_quat([sensor_data["q_x"], sensor_data["q_y"], sensor_data["q_z"], sensor_data["q_w"]])  # Current orientation as a rotation object
         R_body_to_inertial = R_current.as_matrix()  # Rotation from body to inertial frame
         R_inertial_to_body = R_body_to_inertial.T  # Inverse (transpose for rotation matrices)

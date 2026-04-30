@@ -13,9 +13,10 @@ from scipy.spatial.transform import Rotation as R
 import lib.mapping_and_planning_examples as mapping_and_planning_examples
 import time, random
 import threading
+import cv2
 
 exp_num = 4                     # 0: Coordinate Transformation, 1: PID Tuning, 2: Kalman Filter, 3: Motion Planning, 4: Project
-control_style = 'keyboard'  # 'keyboard' or 'path_planner'
+control_style = 'path_planner'  # 'keyboard' or 'path_planner'
 rand_env = False                # Randomise the environment
 
 # Global variables for handling threads
@@ -183,6 +184,7 @@ class CrazyflieInDroneDome(Supervisor):
                 self.gate_positions.append(goal_node.getField('translation').getSFVec3f())
                 self.gate_sizes.append(goal_node.getField('goalSize').getSFVec3f())
                 self.gate_orientations.append(goal_node.getField('rotation').getSFRotation())
+                print(f"Gate {i} position: {self.gate_positions[-1]}, size: {self.gate_sizes[-1]}, orientation: {self.gate_orientations[-1]}")
 
     # Randomise the positions of the drone, obstacles, goal, take-off pad and landing pad
     def randomise_positions(self):
@@ -252,7 +254,7 @@ class CrazyflieInDroneDome(Supervisor):
         goal_size_field = goal_node.getField('goalSize')
         goal_size_field.setSFVec3f([h, goal_size, goal_opening_height])
 
-        # Update the top beam
+        # Update the top beam 
         top_beam_length = goal_size
         top_beam_scale_field = goal_node.getField('topBeamScale')
         top_beam_scale_field.setSFVec3f([top_beam_length, w, h])
@@ -544,6 +546,63 @@ class CrazyflieInDroneDome(Supervisor):
 
         return image
     
+    # Display the camera feed with gate detection overlay
+    def display_camera_with_detection(self, camera_frame):
+        """Display the camera frame with gate detection overlay."""
+        # Convert BGRA to BGR for OpenCV
+        bgr = cv2.cvtColor(camera_frame, cv2.COLOR_BGRA2BGR)
+        
+        # Gate detection using HSV color filtering
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        
+        HSV_LOWER = np.array([140, 50, 120])
+        HSV_UPPER = np.array([160, 255, 255])
+        MIN_CONTOUR_AREA = 200.0
+        
+        mask = cv2.inRange(hsv, HSV_LOWER, HSV_UPPER)
+        
+        # Morphological operations
+        kernel = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        gate_detected = False
+        if contours:
+            best = max(contours, key=cv2.contourArea)
+            x, y, w, h = cv2.boundingRect(best)
+            area = w * h
+            
+            if area >= MIN_CONTOUR_AREA:
+                gate_detected = True
+                center = (int(x + w / 2), int(y + h / 2))
+                
+                # Draw center circle
+                cv2.circle(bgr, center, 10, (0, 255, 0), -1)
+                
+                # Extract and draw corners if 4 vertices
+                epsilon = 0.02 * cv2.arcLength(best, True)
+                approx = cv2.approxPolyDP(best, epsilon, True)
+                if len(approx) == 4:
+                    corners = tuple(tuple(pt[0]) for pt in approx)
+                    for corner in corners:
+                        cv2.circle(bgr, (int(corner[0]), int(corner[1])), 5, (255, 255, 255), -1)
+                    pts = np.array(corners, dtype=np.int32).reshape((-1, 1, 2))
+                    cv2.polylines(bgr, [pts], isClosed=True, color=(255, 255, 255), thickness=2)
+        
+        # Add status text
+        if gate_detected:
+            cv2.putText(bgr, "Gate Detected", (10, 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        else:
+            cv2.putText(bgr, "No Gate Detected", (10, 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        
+        # Show the frame (this runs in the main thread, not the planner thread)
+        cv2.imshow('Drone Camera - Gate Detection', bgr)
+        cv2.waitKey(1)
+    
     # Detect which segment the drone is in
     def check_segment(self, sensor_data):
         drone_pos = np.array([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
@@ -723,6 +782,9 @@ if __name__ == '__main__':
 
                         # Read the camera feed
                         camera_data = drone.read_camera()
+                        
+                        # Display the camera feed with gate detection overlay
+                        drone.display_camera_with_detection(camera_data)
                         
                         # Update the sensor data in the thread
                         with sensor_lock:
