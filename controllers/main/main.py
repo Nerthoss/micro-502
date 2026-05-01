@@ -16,7 +16,7 @@ import threading
 import cv2
 
 exp_num = 4                     # 0: Coordinate Transformation, 1: PID Tuning, 2: Kalman Filter, 3: Motion Planning, 4: Project
-control_style = 'path_planner'  # 'keyboard' or 'path_planner'
+control_style = 'path_planner'      # 'keyboard' or 'path_planner'
 rand_env = False                # Randomise the environment
 
 # Global variables for handling threads
@@ -203,10 +203,11 @@ class CrazyflieInDroneDome(Supervisor):
             y = self.circle_centre[1] - radius * np.sin(angular_position)
 
             # if i == 0:
-                # Set the take-off pose of the drone and take-off pad
-                # takeoff_position = [x, y]
-                # takeoff_orientation = angular_position - np.pi/2
-                # self.set_take_off_position(takeoff_position, takeoff_orientation)
+            #     # Set the take-off pose of the drone and take-off pad
+            #     takeoff_position = [x, y]
+            #     takeoff_orientation = angular_position - np.pi/2
+            #     self.set_take_off_position(takeoff_position, takeoff_orientation)
+            #     print(f"Take-off position: {takeoff_position}, orientation: {takeoff_orientation}")
             # else:
             if i > 0:
                 # Set the pose of the gate
