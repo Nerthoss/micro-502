@@ -29,9 +29,11 @@ from enum import Enum, auto
 
 class State(Enum):
     TAKEOFF     = auto()
-    SEARCHING   = auto()   
-    FLY_TO_GATE = auto()
-    PASSED_GATE = auto()
+    SEARCHING   = auto()
+    ADJUST_Z    = auto()
+    GO_TO_GATE  = auto()
+    GO_TO_YAW   = auto()
+    PASS_GATE   = auto()
 
 @dataclass
 class GateDetection:
@@ -94,6 +96,9 @@ class CameraSpecs:
     fov_y: float = 1.5  # radians
     img_width: int = 300
     img_height: int = 300
+    lateral_offset_px: float = 0.0  # tune this to correct systematic left/right bias:
+                                     # positive → shift principal point right (gate was estimated too far left)
+                                     # negative → shift principal point left  (gate was estimated too far right)
 
 class MyAssignment:
     def __init__(self):
@@ -112,8 +117,7 @@ class MyAssignment:
         control_command = self.fsm.step(sensor_data, camera_frame)
         print(f"  State: {self.fsm.state.name:15s} | "
               f"Setpoint: x={control_command.x:.2f}  y={control_command.y:.2f}  "
-              f"z={control_command.z:.2f}  yaw={control_command.yaw:.1f}°"
-              f" |  Gate detected: {self.fsm.detector.detect(camera_frame).detected}")
+              f"z={control_command.z:.2f}  yaw={control_command.yaw:.1f}°")
     
         return list(control_command)
     
@@ -151,8 +155,18 @@ class GateDetector:
 
         if area < self.MIN_CONTOUR_AREA:
             return GateDetection(detected=False)
-        
-        center_px = (x + w / 2, y + h / 2)
+
+        # Use image moments for the centroid instead of the bounding box centre.
+        # The moment centroid is the centre-of-mass of the detected pink pixels,
+        # which is robust to partial occlusion: if both sides of the gate frame
+        # are visible their pixel masses balance around the true gate centre,
+        # whereas the bounding box centre is pulled toward whichever side has
+        # more visible pixels.
+        M = cv2.moments(best)
+        if M['m00'] > 0:
+            center_px = (M['m10'] / M['m00'], M['m01'] / M['m00'])
+        else:
+            center_px = (x + w / 2, y + h / 2)  # fallback to bbox centre
 
         # Approximate contour to polygon and extract corners if 4 vertices found
         epsilon = 0.02 * cv2.arcLength(best, True)
@@ -194,9 +208,11 @@ class GateDetector:
         distance = f_px * self.GATE_REAL_HEIGHT / bbox_height_px
 
         # ── 3. Build the ray in camera frame ────────────────────────────────────
-        # Normalised image-plane coordinates (OpenCV origin = top-left)
-        x_cam = (u - cam.img_width  / 2.0) / f_px   # positive → right
-        y_cam = (v - cam.img_height / 2.0) / f_px   # positive → down
+        # Normalised image-plane coordinates (OpenCV origin = top-left).
+        # lateral_offset_px shifts the assumed principal point to compensate
+        # for camera mounting offset or calibration bias.
+        x_cam = (u - (cam.img_width  / 2.0 + cam.lateral_offset_px)) / f_px   # positive → right
+        y_cam = (v -  cam.img_height / 2.0)                           / f_px   # positive → down
 
         # Ray in camera frame, un-normalised; z_cam = 1 (forward)
         ray_cam = np.array([x_cam, y_cam, 1.0])
@@ -232,11 +248,18 @@ class GateDetector:
         return gate_world  # (x, y, z) in world frame
     
 class DroneFSM:
-    SEARCH_YAW_RATE         = np.deg2rad(10)  # rad/step
-    HOVER_Z                 = 1.0 # meters
-    TAKEOFF_Z               = 1.0 # meters
-    TAKEOFF_Z_TOL           = 0.1 # meters
-    MAX_GATE_DRIFT          = 0.5 # meters
+    HOVER_Z                 = 1.0   # meters
+    TAKEOFF_Z               = 1.0   # meters
+    TAKEOFF_Z_TOL           = 0.05  # meters
+    POS_XY_TOL              = 0.05  # meters — tolerance for XY waypoints
+    POS_Z_TOL               = 0.05  # meters — tolerance for Z waypoint
+    YAW_TOL                 = np.deg2rad(3)  # rad — tolerance for yaw alignment
+    SEARCH_LATERAL_OFFSET   =  1.0  # meters (right in drone frame, toward world centre)
+    NUM_SEARCH_DETECTIONS   = 5     # number of detections to fuse
+    PASS_GATE_FORWARD       = 0.5   # meters to move forward after gate alignment
+    EMA_ALPHA               = 0.3   # weight for new detections in GO_TO_GATE (0=ignore, 1=replace)
+    APPROACH_OFFSET         = 0.3   # meters in front of gate to stop before passing
+    MAX_DETECTION_DRIFT     = 0.5   # meters — max allowed shift per EMA update in GO_TO_GATE
 
     def __init__(self, specs: Optional[CameraSpecs] = None, gate_count: int = 5):
         self.specs = specs if specs is not None else CameraSpecs()
@@ -245,51 +268,59 @@ class DroneFSM:
 
         self.state: State = State.TAKEOFF
         self.current_gate_idx: int = 0
-        self.gate_position: Optional[Tuple[float, float, float]] = None
-        self.search_yaw: float = 0.0
+
+        # Gate estimate storage
+        self.gate_estimate: Optional[GateEstimate] = None  # fused estimate
+
+        # Search sub-state tracking
+        self._search_origin: Optional[np.ndarray] = None   # drone XYZ at start of SEARCHING
+        self._search_origin_yaw: float = 0.0
+        self._search_detections: list = []                  # accumulates world positions
+        self._search_phase: str = 'move_lateral'            # 'move_lateral' | 'detect' | 'return'
+        self._search_detect_positions: list = []            # 5 XY positions for detection sweep
+        self._search_detect_idx: int = 0                    # which detection position we're at
+
         self.last_setpoint: Optional[Setpoint] = None
-        self.last_estimation_pos: Optional[np.ndarray] = None  # XY position at last gate estimate
 
     def step(self, drone_state, camera_frame) -> Setpoint:
-        detection = (
-            self.detector.detect(camera_frame)
-            if self.state == State.SEARCHING
-            else GateDetection(detected=False)
-        )
-
         if self.state == State.TAKEOFF:
             setpoint = self._handle_takeoff(drone_state)
 
         elif self.state == State.SEARCHING:
-            setpoint = self._handle_search(drone_state, detection)
+            setpoint = self._handle_search(drone_state, camera_frame)
 
-        elif self.state == State.FLY_TO_GATE:
-            setpoint = self._handle_fly_to_gate(drone_state, camera_frame)
-        
-        elif self.state == State.PASSED_GATE:
-            setpoint = self._handle_passed_gate(drone_state)
-        
+        elif self.state == State.ADJUST_Z:
+            setpoint = self._handle_adjust_z(drone_state)
+
+        elif self.state == State.GO_TO_GATE:
+            setpoint = self._handle_go_to_gate(drone_state, camera_frame)
+
+        elif self.state == State.GO_TO_YAW:
+            setpoint = self._handle_go_to_yaw(drone_state)
+
+        elif self.state == State.PASS_GATE:
+            setpoint = self._handle_pass_gate(drone_state)
+
         else:
             setpoint = self._hold_position(drone_state)
 
         self.last_setpoint = setpoint
         return setpoint
-    
+
     @property
     def finished(self) -> bool:
-        return False
         return self.current_gate_idx >= self.gate_count
-    
-    # State handlers
+
+    # ------------------------------------------------------------------ #
+    #  State handlers                                                       #
+    # ------------------------------------------------------------------ #
+
     def _handle_takeoff(self, drone_state) -> Setpoint:
-        """
-        Climb straight up to TAKEOFF_Z, then transition to SEARCH.
-        XY and yaw are frozen at the initial position.
-        """
+        """Climb to TAKEOFF_Z, then transition to SEARCHING."""
         if abs(drone_state['z_global'] - self.TAKEOFF_Z) < self.TAKEOFF_Z_TOL:
-            print(f"[TAKEOFF → SEARCH]  Target altitude {self.TAKEOFF_Z} m reached")
+            print(f"[TAKEOFF → SEARCHING]  Altitude {self.TAKEOFF_Z} m reached")
+            self._init_search(drone_state)
             self._transition(State.SEARCHING)
-            self.search_yaw = drone_state['yaw']   # reset scan from current yaw
 
         return Setpoint(
             x=drone_state['x_global'],
@@ -298,70 +329,268 @@ class DroneFSM:
             yaw=drone_state['yaw'],
         )
 
-    def _handle_search(self, drone_state, detection: GateDetection) -> Setpoint:
-        if detection.detected:
-            self.gate_position = self.detector.estimate_world_position(detection, drone_state)
-            self.last_estimation_pos = np.array([drone_state['x_global'], drone_state['y_global']])
-            print(f"[SEARCH → FLY_TO_GATE]  Gate {self.current_gate_idx} "
-                  f"detected at {self.gate_position}")
-            self._transition(State.FLY_TO_GATE)
+    def _handle_search(self, drone_state, camera_frame) -> Setpoint:
+        """
+        Three-phase search:
+          1. move_lateral  – displace 1 m to the left of world centre
+          2. detect        – visit 5 spread positions and collect detections
+          3. return        – fly back to the origin of the search
+        After phase 3, fuse the collected positions and advance to ADJUST_Z.
+        """
+        x  = drone_state['x_global']
+        y  = drone_state['y_global']
+        z  = drone_state['z_global']
+        ox, oy, oz = self.search_origin_xyz
 
-            return self._setpoint_toward_gate(drone_state)
-        
-        # Rotate in place to search for gate
-        self.search_yaw += self.SEARCH_YAW_RATE
+        # ── Phase 1: move to lateral offset position ───────────────────────────
+        if self._search_phase == 'move_lateral':
+            # Offset is in the DRONE frame at search start: -1 m along drone's left axis.
+            # Drone forward = [cos(yaw), sin(yaw)]; drone left = [-sin(yaw), cos(yaw)]
+            yaw0 = self._search_origin_yaw
+            target_x = ox + self.SEARCH_LATERAL_OFFSET * (-np.sin(yaw0))
+            target_y = oy + self.SEARCH_LATERAL_OFFSET * ( np.cos(yaw0))
+            target_z = self.HOVER_Z
+            dist = np.hypot(x - target_x, y - target_y)
+            if dist < self.POS_XY_TOL:
+                print("[SEARCH]  Lateral offset reached — starting 5-point detection")
+                self._search_phase = 'detect'
+                self._build_detect_positions(target_x, target_y)
+                self._search_detect_idx = 0
+
+            return Setpoint(x=target_x, y=target_y, z=target_z, yaw=self._search_origin_yaw)
+
+        # ── Phase 2: collect detections from 5 positions ──────────────────────
+        elif self._search_phase == 'detect':
+            tp = self._search_detect_positions[self._search_detect_idx]
+            dist = np.hypot(x - tp[0], y - tp[1])
+
+            if dist < self.POS_XY_TOL:
+                # We are at the detection position — attempt detection
+                detection = self.detector.detect(camera_frame)
+                if detection.detected:
+                    wp = self.detector.estimate_world_position(detection, drone_state)
+                    self._search_detections.append(wp)
+                    print(f"[SEARCH]  Detection {len(self._search_detections)}/5 "
+                          f"at pos {tp} → gate {wp}")
+                else:
+                    print(f"[SEARCH]  No detection at pos {tp}")
+
+                self._search_detect_idx += 1
+                if self._search_detect_idx >= len(self._search_detect_positions):
+                    print("[SEARCH]  5 positions visited — returning to origin")
+                    self._search_phase = 'return'
+
+            return Setpoint(x=tp[0], y=tp[1], z=self.HOVER_Z, yaw=self._search_origin_yaw)
+
+        # ── Phase 3: return to origin, then fuse and advance ──────────────────
+        elif self._search_phase == 'return':
+            dist = np.hypot(x - ox, y - oy)
+            if dist < self.POS_XY_TOL:
+                self._fuse_detections_and_advance(drone_state)
+            return Setpoint(x=ox, y=oy, z=self.HOVER_Z, yaw=self._search_origin_yaw)
+
+        return self._hold_position(drone_state)
+
+    def _handle_adjust_z(self, drone_state) -> Setpoint:
+        """Move to the estimated gate Z height; keep XY fixed."""
+        gz = self.gate_estimate.position[2]
+        if abs(drone_state['z_global'] - gz) < self.POS_Z_TOL:
+            print(f"[ADJUST_Z → GO_TO_GATE]  Z {gz:.2f} m reached")
+            self._transition(State.GO_TO_GATE)
+
         return Setpoint(
             x=drone_state['x_global'],
             y=drone_state['y_global'],
-            z=self.HOVER_Z,
-            yaw=self.search_yaw
+            z=gz,
+            yaw=drone_state['yaw'],
         )
-    
-    def _handle_fly_to_gate(self, drone_state, camera_frame) -> Setpoint:
-        drone_pos = np.array([drone_state['x_global'], drone_state['y_global'], drone_state['z_global']])
-        
-        if self.gate_position is None:
-            return self._hold_position(drone_state)
-        
-        # Re-estimate if drone moved 0.5 m since last estimation
-        dist_since_last = np.linalg.norm(drone_state['x_global'] - self.last_estimation_pos[0]) + np.linalg.norm(drone_state['y_global'] - self.last_estimation_pos[1])
-        if dist_since_last >= 0.5:
-            detection = self.detector.detect(camera_frame)
-            if detection.detected:
-                new_est = self.detector.estimate_world_position(detection, drone_state)
-                drift = np.linalg.norm(new_est[:2] - self.gate_position[:2])
-                if drift < self.MAX_GATE_DRIFT:
-                    self.gate_position = new_est
-                    self.last_estimation_pos = drone_pos[:2]
-                    print(f"[FLY_TO_GATE]  Gate position re-estimated with drift {drift:.2f} m: {self.gate_position}")
-                else:
-                    print(f"[FLY_TO_GATE]  Re-estimation drift {drift:.2f} m too high, ignoring new estimate")
-                    self.last_estimation_pos = drone_pos[:2]  # still update last estimation position to avoid repeated re-estimation
-            print(f"[FLY_TO_GATE]  Gate position updated: {self.gate_position}")
 
-        # Passage detection: drone has reached the gate plane
-        dist = np.linalg.norm(self.gate_position[:2] - drone_pos[:2])  # horizontal distance to gate center
-        if dist < 0.1:  # metres — tune this threshold
-            print(f"[FLY_TO_GATE → PASSED_GATE]  Gate {self.current_gate_idx} passed")
-            self._transition(State.PASSED_GATE)
+    def _handle_go_to_gate(self, drone_state, camera_frame) -> Setpoint:
+        """
+        Fly to the estimated gate XY position at gate Z height.
+        Every step, attempt a new detection and refine the estimate
+        using an exponential moving average (alpha = EMA_ALPHA).
+        """
+        # ── Continuous detection: refine gate estimate ──────────────────────
+        detection = self.detector.detect(camera_frame)
+        if detection.detected:
+            new_pos = self.detector.estimate_world_position(detection, drone_state)
+
+            # Reject detections that have jumped too far from the current estimate
+            # — this filters out the next gate appearing in the camera view.
+            drift = np.linalg.norm(new_pos[:2] - self.gate_estimate.position[:2])
+            if drift > self.MAX_DETECTION_DRIFT:
+                print(f"[GO_TO_GATE]  Detection rejected — drift {drift:.2f} m "
+                      f"> {self.MAX_DETECTION_DRIFT} m (likely next gate)")
+            else:
+                # EMA update on position
+                old_pos = self.gate_estimate.position
+                refined_pos = self.EMA_ALPHA * new_pos + (1.0 - self.EMA_ALPHA) * old_pos
+
+                # Gate yaw is its normal direction: bearing-to-gate + π/2
+                dx = new_pos[0] - drone_state['x_global']
+                dy = new_pos[1] - drone_state['y_global']
+                new_yaw  = self._wrap_angle(np.arctan2(dy, dx) + np.pi / 2)
+                yaw_diff = self._wrap_angle(new_yaw - self.gate_estimate.yaw)
+                refined_yaw = self._wrap_angle(
+                    self.gate_estimate.yaw + self.EMA_ALPHA * yaw_diff
+                )
+
+                self.gate_estimate = GateEstimate(
+                    position=refined_pos,
+                    yaw=refined_yaw,
+                    yaw_std=self.gate_estimate.yaw_std,
+                    method='ema',
+                    num_frames=self.gate_estimate.num_frames + 1,
+                )
+                print(f"[GO_TO_GATE]  Estimate refined (n={self.gate_estimate.num_frames}): "
+                      f"pos={np.round(refined_pos, 2)}, yaw={np.degrees(refined_yaw):.1f}°")
+
+        # ── Navigation: target is APPROACH_OFFSET metres in front of the gate ──
+        # Gate normal direction = gate_estimate.yaw.
+        # "In front" = offset opposite to the normal (drone approaches from that side).
+        gx, gy, gz = self.gate_estimate.position
+        gate_yaw = self.gate_estimate.yaw
+        approach_x = gx - self.APPROACH_OFFSET * np.cos(gate_yaw)
+        approach_y = gy - self.APPROACH_OFFSET * np.sin(gate_yaw)
+
+        dx = approach_x - drone_state['x_global']
+        dy = approach_y - drone_state['y_global']
+        dist = np.hypot(dx, dy)
+
+        if dist < self.POS_XY_TOL:
+            print("[GO_TO_GATE → GO_TO_YAW]  Approach point reached")
+            self._transition(State.GO_TO_YAW)
+
+        # Face toward the gate (not the approach point) while flying
+        dx_gate = gx - drone_state['x_global']
+        dy_gate = gy - drone_state['y_global']
+        yaw = np.arctan2(dy_gate, dx_gate) if np.hypot(dx_gate, dy_gate) > 0.01 else drone_state['yaw']
+        return Setpoint(x=approach_x, y=approach_y, z=gz, yaw=yaw)
+
+    def _handle_go_to_yaw(self, drone_state) -> Setpoint:
+        """Rotate in yaw to match the gate's estimated normal direction."""
+        target_yaw = self.gate_estimate.yaw
+        yaw_err = self._wrap_angle(target_yaw - drone_state['yaw'])
+
+        if abs(yaw_err) < self.YAW_TOL:
+            print(f"[GO_TO_YAW → PASS_GATE]  Yaw aligned to "
+                  f"{np.degrees(target_yaw):.1f}°")
+            self._transition(State.PASS_GATE)
+
+        gx, gy, gz = self.gate_estimate.position
+        return Setpoint(x=gx, y=gy, z=gz, yaw=target_yaw)
+
+    def _handle_pass_gate(self, drone_state) -> Setpoint:
+        """
+        Move forward (along current yaw) by PASS_GATE_FORWARD metres,
+        then start searching for the next gate.
+        """
+        if not hasattr(self, '_pass_gate_target') or self._pass_gate_target is None:
+            yaw = drone_state['yaw']
+            self._pass_gate_target = np.array([
+                drone_state['x_global'] + self.PASS_GATE_FORWARD * np.cos(yaw),
+                drone_state['y_global'] + self.PASS_GATE_FORWARD * np.sin(yaw),
+                drone_state['z_global'],
+            ])
+            print(f"[PASS_GATE]  Moving forward {self.PASS_GATE_FORWARD} m "
+                  f"to {self._pass_gate_target[:2]}")
+
+        tx, ty, tz = self._pass_gate_target
+        dist = np.hypot(drone_state['x_global'] - tx, drone_state['y_global'] - ty)
+
+        if dist < self.POS_XY_TOL:
+            self._pass_gate_target = None
+            self.current_gate_idx += 1
+            self.gate_estimate = None
+
+            if self.finished:
+                print("[PASS_GATE]  All gates passed — holding position.")
+                return self._hold_position(drone_state)
+
+            print(f"[PASS_GATE → SEARCHING]  Gate {self.current_gate_idx - 1} complete, "
+                  f"searching for gate {self.current_gate_idx}")
+            self._init_search(drone_state)
+            self._transition(State.SEARCHING)
             return self._hold_position(drone_state)
 
-        return self._setpoint_toward_gate(drone_state)
-    
-    def _handle_passed_gate(self, drone_state) -> Setpoint:
-        self.current_gate_idx += 1
-        self.gate_position = None
+        return Setpoint(x=tx, y=ty, z=tz, yaw=drone_state['yaw'])
 
-        if self.finished:
-            print("[PASSED_GATE]  Lap complete!")
-            return self._hold_position(drone_state)
-        
-        print(f"[PASSED_GATE → SEARCH]  Looking for gate {self.current_gate_idx}")
-        self.search_yaw = drone_state['yaw']   # reset scan from current yaw
-        self._transition(State.SEARCHING)
-        return self._hold_position(drone_state)
-    
-    # Helper methods
+    # ------------------------------------------------------------------ #
+    #  Search helpers                                                        #
+    # ------------------------------------------------------------------ #
+
+    def _init_search(self, drone_state):
+        """Reset all search sub-state to start a fresh search cycle."""
+        self._search_origin = np.array([
+            drone_state['x_global'],
+            drone_state['y_global'],
+            drone_state['z_global'],
+        ])
+        self._search_origin_yaw = drone_state['yaw']
+        self._search_detections = []
+        self._search_phase = 'move_lateral'
+        self._search_detect_positions = []
+        self._search_detect_idx = 0
+
+    @property
+    def search_origin_xyz(self):
+        if self._search_origin is None:
+            return 0.0, 0.0, self.HOVER_Z
+        return self._search_origin[0], self._search_origin[1], self._search_origin[2]
+
+    def _build_detect_positions(self, base_x: float, base_y: float):
+        """
+        Build 5 slightly spread positions around the lateral offset point
+        so each detection comes from a different viewpoint.
+        Offsets of ±0.2 m along the drone's forward axis (at search start)
+        to get parallax without losing sight of the gate.
+        """
+        offsets = [-0.2, -0.1, 0.0, 0.1, 0.2]
+        yaw0 = self._search_origin_yaw
+        # Drone forward unit vector in world frame
+        fwd_x = np.cos(yaw0)
+        fwd_y = np.sin(yaw0)
+        self._search_detect_positions = [
+            (base_x + d * fwd_x, base_y + d * fwd_y) for d in offsets
+        ]
+
+    def _fuse_detections_and_advance(self, drone_state):
+        """Average valid detections into a gate estimate, then go to ADJUST_Z.
+        If no detections were collected, rotate 10° CCW and restart the manoeuvre."""
+        if not self._search_detections:
+            print("[SEARCH]  No detections — rotating 10° CCW and restarting")
+            rotated_yaw = self._wrap_angle(self._search_origin_yaw + np.deg2rad(10))
+            self._init_search(drone_state)
+            self._search_origin_yaw = rotated_yaw  # override with rotated yaw
+            return
+
+        positions = np.array(self._search_detections)   # (N, 3)
+        mean_pos  = positions.mean(axis=0)
+
+        # Gate yaw is the gate's normal direction (perpendicular to its face).
+        # arctan2 gives the bearing from drone to gate; the gate normal is
+        # 90° counter-clockwise from that bearing (i.e. bearing + π/2).
+        dx = mean_pos[0] - drone_state['x_global']
+        dy = mean_pos[1] - drone_state['y_global']
+        gate_yaw = self._wrap_angle(np.arctan2(dy, dx) + np.pi / 2)
+
+        self.gate_estimate = GateEstimate(
+            position=mean_pos,
+            yaw=gate_yaw,
+            yaw_std=0.0,
+            method='fusion',
+            num_frames=len(self._search_detections),
+        )
+        print(f"[SEARCH → ADJUST_Z]  Gate estimate fused from "
+              f"{len(self._search_detections)} detections: pos={mean_pos}, "
+              f"yaw={np.degrees(gate_yaw):.1f}°")
+        self._transition(State.ADJUST_Z)
+
+    # ------------------------------------------------------------------ #
+    #  Generic helpers                                                       #
+    # ------------------------------------------------------------------ #
+
     def _transition(self, new_state: State):
         self.state = new_state
 
@@ -370,24 +599,13 @@ class DroneFSM:
             x=drone_state['x_global'],
             y=drone_state['y_global'],
             z=drone_state['z_global'],
-            yaw=drone_state['yaw']
+            yaw=drone_state['yaw'],
         )
-    
-    def _setpoint_toward_gate(self, drone_state) -> Setpoint:
-        gp  = self.gate_position
-        
-        # yaw computation
-        dx  = gp[0] - drone_state['x_global']
-        dy  = gp[1] - drone_state['y_global']
-        yaw = np.arctan2(dy, dx)
 
-        #print(f"[Setpoint]  Moving toward gate at {gp} with yaw {np.degrees(yaw):.1f}°")
-        return Setpoint(
-            x=gp[0],
-            y=gp[1],
-            z=gp[2],
-            yaw=yaw,
-        )
+    @staticmethod
+    def _wrap_angle(angle: float) -> float:
+        """Wrap angle to [-π, π]."""
+        return (angle + np.pi) % (2 * np.pi) - np.pi
 
 # Module-level singleton so main.py can call assignment.get_command() unchanged
 _controller = MyAssignment()
